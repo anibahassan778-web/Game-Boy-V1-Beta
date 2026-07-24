@@ -1,0 +1,6 @@
+{
+  "name": "Game Boy Emulator",
+  "description": "Cycle-accurate Game Boy and Game Boy Color emulator with full CPU, PPU, APU, MBC, and Debugger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
