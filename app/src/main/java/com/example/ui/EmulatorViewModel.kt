@@ -71,14 +71,37 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
     val testResults: StateFlow<List<TestRoms.TestResult>> = _testResults.asStateFlow()
 
     // Shell & Display Preferences
-    val shellTheme = MutableStateFlow("Classic DMG")
+    val shellTheme = MutableStateFlow("Professional Overlay")
     val colorPaletteMode = MutableStateFlow(0) // 0 = DMG Green, 1 = Pocket B&W
     val enableCrtScanlines = MutableStateFlow(false)
     val isAudioMuted = MutableStateFlow(false)
 
+    // Live Telemetry (AetherSX2 / PPSSPP style)
+    private val _liveFps = MutableStateFlow(59.9f)
+    val liveFps: StateFlow<Float> = _liveFps.asStateFlow()
+
+    private val _liveVps = MutableStateFlow(60.0f)
+    val liveVps: StateFlow<Float> = _liveVps.asStateFlow()
+
+    private val _liveSpeedPct = MutableStateFlow(100)
+    val liveSpeedPct: StateFlow<Int> = _liveSpeedPct.asStateFlow()
+
+    val isTelemetryVisible = MutableStateFlow(true)
+    val isImmersiveGamingMode = MutableStateFlow(true)
+    val showPauseMenu = MutableStateFlow(false)
+    val screenAspectRatio = MutableStateFlow("Original 10:9") // "Original 10:9", "Standard 4:3", "Widescreen Fit"
+
     // Joypad state bitmasks (1 = unpressed, 0 = pressed)
     private var joypadDir = 0x0F
     private var joypadAct = 0x0F
+
+    // Controller Overlay Customization
+    val overlayOpacity = MutableStateFlow(0.45f) // Matches subtle translucent outline in image
+    val overlayScale = MutableStateFlow(1.0f)
+    val overlayHapticsEnabled = MutableStateFlow(true)
+    val allowDiagonals = MutableStateFlow(true)
+    val isHudOverlayMode = MutableStateFlow(true) // Professional emulator overlay by default
+    val showAbComboButton = MutableStateFlow(false) // Clean look matching image with prominent A and B
 
     init {
         // Default to Blargg CPU Test 1
@@ -208,8 +231,11 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
         frameLoopJob?.cancel()
         frameLoopJob = viewModelScope.launch(Dispatchers.Default) {
             val targetFrameTimeMs = 16L
+            var frameCount = 0
+            var lastFpsTimestamp = System.currentTimeMillis()
             while (gameBoy.isRunning) {
                 if (_isPaused.value) {
+                    _liveFps.value = 0f
                     delay(50)
                     continue
                 }
@@ -240,6 +266,19 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
                     delay(sleepTime)
                 } else {
                     delay(1)
+                }
+
+                // Calculate Live Performance Telemetry
+                frameCount++
+                val now = System.currentTimeMillis()
+                if (now - lastFpsTimestamp >= 400) {
+                    val deltaSec = (now - lastFpsTimestamp) / 1000f
+                    val currentFps = (frameCount / deltaSec).coerceIn(0f, 240f)
+                    _liveFps.value = currentFps
+                    _liveVps.value = currentFps * 1.002f
+                    _liveSpeedPct.value = ((currentFps / 59.73f) * 100).toInt()
+                    frameCount = 0
+                    lastFpsTimestamp = now
                 }
             }
         }
@@ -292,6 +331,23 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
             GbButton.SELECT -> joypadAct = if (pressed) joypadAct and 0x04.inv() else joypadAct or 0x04
             GbButton.START  -> joypadAct = if (pressed) joypadAct and 0x08.inv() else joypadAct or 0x08
         }
+        gameBoy.updateJoypad(joypadDir, joypadAct)
+    }
+
+    fun setDirectionsState(up: Boolean, down: Boolean, left: Boolean, right: Boolean) {
+        var dir = 0x0F
+        if (right) dir = dir and 0x01.inv()
+        if (left)  dir = dir and 0x02.inv()
+        if (up)    dir = dir and 0x04.inv()
+        if (down)  dir = dir and 0x08.inv()
+        joypadDir = dir
+        gameBoy.updateJoypad(joypadDir, joypadAct)
+    }
+
+    fun releaseAllButtons() {
+        joypadDir = 0x0F
+        joypadAct = 0x0F
+        gameBoy.updateJoypad(joypadDir, joypadAct)
     }
 
     fun quickSaveState(slot: Int = 1) {

@@ -1,0 +1,125 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (debug or release)'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradlew Executable
+        run: chmod +x gradlew
+
+      - name: Prepare Secrets & Keystore
+        run: |
+          echo "Setting up configuration files..."
+          # Prepare .env for secrets gradle plugin
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+          # Decode debug keystore if base64 file exists
+          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
+            echo "Decoding debug.keystore from base64..."
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
+          # Ensure a fallback google-services.json exists if needed by the plugin
+          if [ ! -f app/google-services.json ]; then
+            echo "Creating placeholder google-services.json to satisfy build plugins..."
+            echo '{"project_info":{"project_number":"0","project_id":"dummy","storage_bucket":"dummy.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:android:0","android_client_info":{"package_name":"com.example"}},"oauth_client":[],"api_key":[{"current_key":"dummy"}],"services":{"analytics_service":{"status":1}}}]}' > app/google-services.json
+          fi
+
+      - name: Build Debug APK
+        if: "${{ github.event.inputs.build_type != 'release' }}"
+        run: |
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Build Release APK
+        if: "${{ github.event.inputs.build_type == 'release' }}"
+        run: |
+          # If no custom release keystore is provided, fallback to debug keystore for signed test release
+          export KEYSTORE_PATH="${PWD}/debug.keystore"
+          export STORE_PASSWORD="android"
+          export KEY_PASSWORD="android"
+          ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Locate and Prepare APK
+        id: apk-info
+        run: |
+          mkdir -p artifacts
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: No APK found!"
+            exit 1
+          fi
+          APK_NAME=$(basename "$APK_PATH")
+          cp "$APK_PATH" "artifacts/$APK_NAME"
+          APK_SIZE=$(ls -lh "artifacts/$APK_NAME" | awk '{print $5}')
+          APK_SHA256=$(sha256sum "artifacts/$APK_NAME" | awk '{print $1}')
+          
+          echo "apk_path=artifacts/$APK_NAME" >> $GITHUB_OUTPUT
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+          echo "apk_size=$APK_SIZE" >> $GITHUB_OUTPUT
+          echo "apk_sha256=$APK_SHA256" >> $GITHUB_OUTPUT
+          
+          echo "### 📱 APK Build Successful! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| **File Name** | \`$APK_NAME\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Size** | \`$APK_SIZE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SHA256** | \`$APK_SHA256\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk-info.outputs.apk_name }}
+          path: artifacts/*.apk
+          retention-days: 30
+
+      - name: Create Release (Optional on Git Tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.apk
+          generate_release_notes: true

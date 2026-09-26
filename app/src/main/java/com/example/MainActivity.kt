@@ -16,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import com.example.ui.DebugInspectorView
 import com.example.ui.EmulatorViewModel
 import com.example.ui.GameBoyScreen
@@ -35,49 +36,55 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme {
                 var selectedTab by remember { mutableIntStateOf(0) }
 
+                val isImmersiveGamingMode by viewModel.isImmersiveGamingMode.collectAsState()
+                val isGamingTab = (selectedTab == 0)
+                val showBottomNav = !isGamingTab || !isImmersiveGamingMode
+
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     bottomBar = {
-                        NavigationBar(
-                            containerColor = Color(0xFF1E2228),
-                            contentColor = Color.White,
-                            windowInsets = WindowInsets.navigationBars
-                        ) {
-                            NavigationBarItem(
-                                selected = (selectedTab == 0),
-                                onClick = { selectedTab = 0 },
-                                icon = { Icon(Icons.Default.VideogameAsset, contentDescription = "Console") },
-                                label = { Text("Console") },
-                                modifier = Modifier.testTag("nav_console_tab")
-                            )
-                            NavigationBarItem(
-                                selected = (selectedTab == 1),
-                                onClick = { selectedTab = 1 },
-                                icon = { Icon(Icons.Default.Folder, contentDescription = "ROMs") },
-                                label = { Text("ROMs") },
-                                modifier = Modifier.testTag("nav_roms_tab")
-                            )
-                            NavigationBarItem(
-                                selected = (selectedTab == 2),
-                                onClick = { selectedTab = 2 },
-                                icon = { Icon(Icons.Default.BugReport, contentDescription = "Debugger") },
-                                label = { Text("Debugger") },
-                                modifier = Modifier.testTag("nav_debugger_tab")
-                            )
-                            NavigationBarItem(
-                                selected = (selectedTab == 3),
-                                onClick = { selectedTab = 3 },
-                                icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                                label = { Text("Settings") },
-                                modifier = Modifier.testTag("nav_settings_tab")
-                            )
+                        if (showBottomNav) {
+                            NavigationBar(
+                                containerColor = Color(0xFF1E2228),
+                                contentColor = Color.White,
+                                windowInsets = WindowInsets.navigationBars
+                            ) {
+                                NavigationBarItem(
+                                    selected = (selectedTab == 0),
+                                    onClick = { selectedTab = 0 },
+                                    icon = { Icon(Icons.Default.VideogameAsset, contentDescription = "Console") },
+                                    label = { Text("Game") },
+                                    modifier = Modifier.testTag("nav_console_tab")
+                                )
+                                NavigationBarItem(
+                                    selected = (selectedTab == 1),
+                                    onClick = { selectedTab = 1 },
+                                    icon = { Icon(Icons.Default.Folder, contentDescription = "ROMs") },
+                                    label = { Text("ROMs") },
+                                    modifier = Modifier.testTag("nav_roms_tab")
+                                )
+                                NavigationBarItem(
+                                    selected = (selectedTab == 2),
+                                    onClick = { selectedTab = 2 },
+                                    icon = { Icon(Icons.Default.BugReport, contentDescription = "Debugger") },
+                                    label = { Text("Debugger") },
+                                    modifier = Modifier.testTag("nav_debugger_tab")
+                                )
+                                NavigationBarItem(
+                                    selected = (selectedTab == 3),
+                                    onClick = { selectedTab = 3 },
+                                    icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                                    label = { Text("Settings") },
+                                    modifier = Modifier.testTag("nav_settings_tab")
+                                )
+                            }
                         }
                     }
                 ) { innerPadding ->
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(innerPadding)
+                            .padding(if (showBottomNav) innerPadding else PaddingValues(0.dp))
                     ) {
                         when (selectedTab) {
                             0 -> GameBoyScreen(viewModel = viewModel, onOpenMenu = { selectedTab = 1 })
