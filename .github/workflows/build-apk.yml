@@ -30,24 +30,34 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'gradle'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Make Gradlew Executable
-        run: chmod +x gradlew
-
-      - name: Prepare Secrets & Keystore
+      - name: Accept Android SDK Licenses & Install Components
         run: |
-          echo "Setting up configuration files..."
-          # Prepare .env for secrets gradle plugin
+          yes | sdkmanager --licenses || true
+          sdkmanager "platforms;android-36" "platform-tools" || true
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-disabled: false
+
+      - name: Prepare Secrets, Environment & Keystore
+        run: |
+          echo "=== Configuring Build Environment ==="
+          
+          # 1. Prepare .env for secrets-gradle-plugin
           if [ ! -f .env ]; then
             if [ -f .env.example ]; then
               cp .env.example .env
@@ -56,39 +66,72 @@ jobs:
             fi
           fi
 
-          # Decode debug keystore if base64 file exists
+          # 2. Setup debug.keystore
           if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
             echo "Decoding debug.keystore from base64..."
             base64 -d debug.keystore.base64 > debug.keystore
           fi
 
-          # Ensure a fallback google-services.json exists if needed by the plugin
+          # Fallback: Generate a standard debug keystore if missing
+          if [ ! -f debug.keystore ]; then
+            echo "Generating fresh debug.keystore fallback..."
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          # 3. Ensure placeholder google-services.json if plugin requires it
           if [ ! -f app/google-services.json ]; then
-            echo "Creating placeholder google-services.json to satisfy build plugins..."
+            echo "Creating dummy google-services.json..."
             echo '{"project_info":{"project_number":"0","project_id":"dummy","storage_bucket":"dummy.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:android:0","android_client_info":{"package_name":"com.example"}},"oauth_client":[],"api_key":[{"current_key":"dummy"}],"services":{"analytics_service":{"status":1}}}]}' > app/google-services.json
+          fi
+
+          # 4. Repair or generate Gradle wrapper if missing or corrupted
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Gradle wrapper jar not found. Generating fresh wrapper..."
+            gradle wrapper --gradle-version 9.3.1
+          fi
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
           fi
 
       - name: Build Debug APK
         if: "${{ github.event.inputs.build_type != 'release' }}"
         run: |
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          echo "=== Building Debug APK ==="
+          if [ -f ./gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            ./gradlew assembleDebug --stacktrace --no-daemon || gradle assembleDebug --stacktrace --no-daemon
+          else
+            gradle assembleDebug --stacktrace --no-daemon
+          fi
 
       - name: Build Release APK
         if: "${{ github.event.inputs.build_type == 'release' }}"
         run: |
-          # If no custom release keystore is provided, fallback to debug keystore for signed test release
+          echo "=== Building Release APK ==="
           export KEYSTORE_PATH="${PWD}/debug.keystore"
           export STORE_PASSWORD="android"
           export KEY_PASSWORD="android"
-          ./gradlew assembleRelease --stacktrace --no-daemon
+          if [ -f ./gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            ./gradlew assembleRelease --stacktrace --no-daemon || gradle assembleRelease --stacktrace --no-daemon
+          else
+            gradle assembleRelease --stacktrace --no-daemon
+          fi
 
-      - name: Locate and Prepare APK
+      - name: Locate and Verify APK
         id: apk-info
         run: |
           mkdir -p artifacts
           APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "Error: No APK found!"
+            echo "::error::No APK file found in app/build/outputs/apk!"
             exit 1
           fi
           APK_NAME=$(basename "$APK_PATH")
@@ -117,7 +160,7 @@ jobs:
           path: artifacts/*.apk
           retention-days: 30
 
-      - name: Create Release (Optional on Git Tags)
+      - name: Create GitHub Release (On Tags)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
