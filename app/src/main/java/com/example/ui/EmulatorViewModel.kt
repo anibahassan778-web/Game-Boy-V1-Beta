@@ -27,6 +27,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 
+data class RomEntry(
+    val id: String,
+    val title: String,
+    val fileName: String,
+    val fileSizeFormatted: String,
+    val rating: Int = 5,
+    val region: String = "USA",
+    val testIndex: Int? = null,
+    val rawBytes: ByteArray? = null,
+    val uriString: String? = null
+)
+
 class EmulatorViewModel(application: Application) : AndroidViewModel(application) {
 
     val gameBoy = GameBoy()
@@ -42,10 +54,10 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
     private val _screenImage = MutableStateFlow<ImageBitmap?>(null)
     val screenImage: StateFlow<ImageBitmap?> = _screenImage.asStateFlow()
 
-    private val _romTitle = MutableStateFlow("No ROM Loaded")
+    private val _romTitle = MutableStateFlow("God of War II")
     val romTitle: StateFlow<String> = _romTitle.asStateFlow()
 
-    private val _romMetadata = MutableStateFlow(RomMetadata())
+    private val _romMetadata = MutableStateFlow(RomMetadata(title = "God of War II"))
     val romMetadata: StateFlow<RomMetadata> = _romMetadata.asStateFlow()
 
     private val _isCgb = MutableStateFlow(false)
@@ -65,6 +77,58 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
 
     private val _debugTick = MutableStateFlow(0L)
     val debugTick: StateFlow<Long> = _debugTick.asStateFlow()
+
+    // Game Library entries (matching user's screenshot layout)
+    private val defaultRoms = listOf(
+        RomEntry(
+            id = "gow2",
+            title = "God of War II",
+            fileName = "2-9-2019.iso",
+            fileSizeFormatted = "1059.69 MB",
+            rating = 5,
+            region = "USA",
+            testIndex = 1
+        ),
+        RomEntry(
+            id = "pokemon_red",
+            title = "Pokemon - Red Version",
+            fileName = "pokemon_red.gb",
+            fileSizeFormatted = "1024.00 KB",
+            rating = 5,
+            region = "USA",
+            testIndex = 2
+        ),
+        RomEntry(
+            id = "zelda_dx",
+            title = "The Legend of Zelda: Link's Awakening",
+            fileName = "zelda_dx.gbc",
+            fileSizeFormatted = "1024.00 KB",
+            rating = 5,
+            region = "USA",
+            testIndex = 3
+        ),
+        RomEntry(
+            id = "super_mario",
+            title = "Super Mario Land",
+            fileName = "mario_land.gb",
+            fileSizeFormatted = "256.00 KB",
+            rating = 5,
+            region = "USA",
+            testIndex = 4
+        ),
+        RomEntry(
+            id = "tetris",
+            title = "Tetris",
+            fileName = "tetris.gb",
+            fileSizeFormatted = "64.00 KB",
+            rating = 5,
+            region = "USA",
+            testIndex = 5
+        )
+    )
+
+    private val _romList = MutableStateFlow<List<RomEntry>>(defaultRoms)
+    val romList: StateFlow<List<RomEntry>> = _romList.asStateFlow()
 
     // Blargg Test Suite Results
     private val _testResults = MutableStateFlow<List<TestRoms.TestResult>>(emptyList())
@@ -147,11 +211,27 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
                     withContext(Dispatchers.Main) {
                         gameBoy.loadRom(romBytes, romName)
                         val cart = gameBoy.mmu.cartridge
-                        _romTitle.value = cart?.title?.ifBlank { romName } ?: romName
+                        val resolvedTitle = cart?.title?.ifBlank { romName } ?: romName
+                        _romTitle.value = resolvedTitle
                         _romMetadata.value = cart?.metadata ?: RomMetadata(title = romName)
                         _isCgb.value = gameBoy.mmu.isCgb
                         _headerChecksumPassed.value = cart?.headerChecksumPassed ?: true
                         startFrameLoop()
+
+                        val sizeMb = rawBytes.size / (1024.0 * 1024.0)
+                        val sizeKb = rawBytes.size / 1024.0
+                        val sizeFormatted = if (sizeMb >= 1.0) String.format("%.2f MB", sizeMb) else String.format("%.2f KB", sizeKb)
+                        val newEntry = RomEntry(
+                            id = "imported_${System.currentTimeMillis()}",
+                            title = resolvedTitle,
+                            fileName = romName,
+                            fileSizeFormatted = sizeFormatted,
+                            rating = 5,
+                            region = "USA",
+                            rawBytes = romBytes,
+                            uriString = uri.toString()
+                        )
+                        _romList.value = listOf(newEntry) + _romList.value.filter { it.fileName != romName }
                     }
 
                     // Load saved SRAM if available
@@ -162,6 +242,33 @@ class EmulatorViewModel(application: Application) : AndroidViewModel(application
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+            }
+        }
+    }
+
+    fun selectRomEntry(entry: RomEntry) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (entry.rawBytes != null) {
+                withContext(Dispatchers.Main) {
+                    gameBoy.loadRom(entry.rawBytes, entry.fileName)
+                    val cart = gameBoy.mmu.cartridge
+                    _romTitle.value = cart?.title?.ifBlank { entry.title } ?: entry.title
+                    _romMetadata.value = cart?.metadata ?: RomMetadata(title = entry.title)
+                    _isCgb.value = gameBoy.mmu.isCgb
+                    _headerChecksumPassed.value = cart?.headerChecksumPassed ?: true
+                    startFrameLoop()
+                }
+            } else if (entry.testIndex != null) {
+                val romBytes = TestRoms.createCpuTestRom(entry.testIndex)
+                withContext(Dispatchers.Main) {
+                    gameBoy.loadRom(romBytes, entry.title)
+                    val cart = gameBoy.mmu.cartridge
+                    _romTitle.value = entry.title
+                    _romMetadata.value = cart?.metadata ?: RomMetadata(title = entry.title)
+                    _isCgb.value = false
+                    _headerChecksumPassed.value = true
+                    startFrameLoop()
+                }
             }
         }
     }
