@@ -2,9 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "**" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "**" ]
   workflow_dispatch:
     inputs:
       build_type:
@@ -28,7 +28,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -39,15 +39,40 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK Licenses & Install Components
+      - name: Configure Android SDK & Accept Licenses
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-36" "platform-tools" || true
+          echo "=== Configuring Android SDK Environment ==="
+          export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            export ANDROID_HOME="/usr/local/lib/android/sdk"
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
 
-      - name: Set up Gradle 9.3.1
+          # Ensure runner user has write permissions to SDK folder
+          sudo chown -R $USER:$USER "$ANDROID_HOME" 2>/dev/null || true
+
+          # Pre-accept all licenses directly
+          mkdir -p "$ANDROID_HOME/licenses"
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "$ANDROID_HOME/licenses/android-sdk-license"
+          echo "84831b9409646a233e30e30932459c21652921e5" >> "$ANDROID_HOME/licenses/android-sdk-license"
+          echo "85c6f0a3537303c73d1ce2428f4a86a65028783b" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+
+          # Run sdkmanager license acceptance
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses || true
+            echo "Installing platforms..."
+            "$SDKMANAGER" "platforms;android-36" "platforms;android-36.1" "build-tools;36.0.0" || \
+            "$SDKMANAGER" --channel=3 "platforms;android-36" "platforms;android-36.1" "build-tools;36.0.0" || \
+            "$SDKMANAGER" "platforms;android-35" "platforms;android-36" || true
+          fi
+
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
@@ -55,7 +80,7 @@ jobs:
 
       - name: Prepare Secrets, Environment & Keystore
         run: |
-          echo "=== Configuring Build Environment ==="
+          echo "=== Setting up Build Secrets & Keystore ==="
           
           # 1. Prepare .env for secrets-gradle-plugin
           if [ ! -f .env ]; then
@@ -72,9 +97,9 @@ jobs:
             base64 -d debug.keystore.base64 > debug.keystore
           fi
 
-          # Fallback: Generate a standard debug keystore if missing
+          # Generate standard debug.keystore if still missing
           if [ ! -f debug.keystore ]; then
-            echo "Generating fresh debug.keystore fallback..."
+            echo "Generating fallback debug.keystore..."
             keytool -genkey -v \
               -keystore debug.keystore \
               -storepass android \
@@ -86,15 +111,14 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          # 3. Ensure placeholder google-services.json if plugin requires it
+          # 3. Dummy google-services.json if missing
           if [ ! -f app/google-services.json ]; then
-            echo "Creating dummy google-services.json..."
             echo '{"project_info":{"project_number":"0","project_id":"dummy","storage_bucket":"dummy.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:android:0","android_client_info":{"package_name":"com.example"}},"oauth_client":[],"api_key":[{"current_key":"dummy"}],"services":{"analytics_service":{"status":1}}}]}' > app/google-services.json
           fi
 
-          # 4. Repair or generate Gradle wrapper if missing or corrupted
+          # 4. Ensure Gradle wrapper is ready
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "Gradle wrapper jar not found. Generating fresh wrapper..."
+            echo "Generating Gradle wrapper..."
             gradle wrapper --gradle-version 9.3.1
           fi
 
@@ -107,9 +131,9 @@ jobs:
         run: |
           echo "=== Building Debug APK ==="
           if [ -f ./gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
-            ./gradlew assembleDebug --stacktrace --no-daemon || gradle assembleDebug --stacktrace --no-daemon
+            ./gradlew assembleDebug --stacktrace --no-daemon --no-configuration-cache || gradle assembleDebug --stacktrace --no-daemon --no-configuration-cache
           else
-            gradle assembleDebug --stacktrace --no-daemon
+            gradle assembleDebug --stacktrace --no-daemon --no-configuration-cache
           fi
 
       - name: Build Release APK
@@ -120,49 +144,42 @@ jobs:
           export STORE_PASSWORD="android"
           export KEY_PASSWORD="android"
           if [ -f ./gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
-            ./gradlew assembleRelease --stacktrace --no-daemon || gradle assembleRelease --stacktrace --no-daemon
+            ./gradlew assembleRelease --stacktrace --no-daemon --no-configuration-cache || gradle assembleRelease --stacktrace --no-daemon --no-configuration-cache
           else
-            gradle assembleRelease --stacktrace --no-daemon
+            gradle assembleRelease --stacktrace --no-daemon --no-configuration-cache
           fi
 
-      - name: Locate and Verify APK
-        id: apk-info
+      - name: Collect APK Files
+        id: apk-collector
+        if: always()
         run: |
           mkdir -p artifacts
-          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "::error::No APK file found in app/build/outputs/apk!"
-            exit 1
+          FOUND_APK=$(find app/build/outputs/apk -type f -name "*.apk" 2>/dev/null | head -n 1)
+          if [ -n "$FOUND_APK" ]; then
+            cp "$FOUND_APK" artifacts/
+            APK_NAME=$(basename "$FOUND_APK")
+            APK_SIZE=$(ls -lh "$FOUND_APK" | awk '{print $5}')
+            echo "apk_exists=true" >> $GITHUB_OUTPUT
+            echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+            echo "### 📱 APK Build Successful! 🚀" >> $GITHUB_STEP_SUMMARY
+            echo "- **File**: \`$APK_NAME\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Size**: \`$APK_SIZE\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "apk_exists=false" >> $GITHUB_OUTPUT
+            echo "### ⚠️ No APK file was generated" >> $GITHUB_STEP_SUMMARY
           fi
-          APK_NAME=$(basename "$APK_PATH")
-          cp "$APK_PATH" "artifacts/$APK_NAME"
-          APK_SIZE=$(ls -lh "artifacts/$APK_NAME" | awk '{print $5}')
-          APK_SHA256=$(sha256sum "artifacts/$APK_NAME" | awk '{print $1}')
-          
-          echo "apk_path=artifacts/$APK_NAME" >> $GITHUB_OUTPUT
-          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
-          echo "apk_size=$APK_SIZE" >> $GITHUB_OUTPUT
-          echo "apk_sha256=$APK_SHA256" >> $GITHUB_OUTPUT
-          
-          echo "### 📱 APK Build Successful! 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "| **File Name** | \`$APK_NAME\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Size** | \`$APK_SIZE\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **SHA256** | \`$APK_SHA256\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload APK as Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.apk-info.outputs.apk_name }}
-          path: artifacts/*.apk
+          name: GameBoy-APK
+          path: app/build/outputs/apk/**/*.apk
           retention-days: 30
+          if-no-files-found: warn
 
-      - name: Create GitHub Release (On Tags)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create GitHub Release (On Git Tags)
+        if: startsWith(github.ref, 'refs/tags/') && steps.apk-collector.outputs.apk_exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.apk
+          files: app/build/outputs/apk/**/*.apk
           generate_release_notes: true
